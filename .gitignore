@@ -17,6 +17,7 @@ env/
 ENV/
 *.egg-info/
 .pytest_cache/
+*.pyc
 
 # Next.js
 frontend/.next/
