@@ -5,6 +5,7 @@ start_backend.bat
 setup_s3.bat
 *.env
 .env.local
+.env*.local
 
 # Python
 __pycache__/
@@ -24,6 +25,7 @@ frontend/.next/
 frontend/out/
 frontend/node_modules/
 frontend/.env*.local
+node_modules/
 
 # IDEs
 .vscode/
@@ -35,9 +37,40 @@ frontend/.env*.local
 .DS_Store
 Thumbs.db
 
-# AWS
+# AWS CLI installer
 aws/
+awscliv2.zip
 
-# Temp files
+# Temp and test files
 *.log
 temp_clone/
+test_*.py
+streamlit_app.py
+
+# Documentation (keep only README.md)
+ARCHITECTURE.md
+AWS_SETUP.md
+CHANGES_SUMMARY.md
+COMPLETE_WORKFLOW.md
+config.py
+deploy.bat
+deploy.sh
+DEPLOYMENT.md
+ERROR_FIX.md
+EVALUATION_METRICS.md
+FINAL_FIXES.md
+FINAL_WORKFLOW.md
+FIXES_SUMMARY.md
+IMPLEMENTATION_COMPLETE.md
+INTEGRATION_GUIDE.md
+NEXTJS_SETUP.md
+QUESTION_FIX.md
+QUICK_START.md
+refresh_credentials.md
+requirements.txt
+setup_s3.py
+SPEECH_TO_TEXT_COMPARISON.md
+START_HERE_NEW.md
+START_HERE.md
+SYSTEM_STATUS.md
+VOICE_FIXES.md

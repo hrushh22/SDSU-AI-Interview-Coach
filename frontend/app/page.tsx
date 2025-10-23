@@ -11,12 +11,14 @@ export default function Home() {
   const [jobDescription, setJobDescription] = useState("");
   const [resumeText, setResumeText] = useState("");
   const [started, setStarted] = useState(false);
+  const [sessionId, setSessionId] = useState("");
   const [question, setQuestion] = useState("");
-  const [questionNum, setQuestionNum] = useState(1);
+  const [questionNum, setQuestionNum] = useState(0);
   const [totalQuestions, setTotalQuestions] = useState(5);
   const [recording, setRecording] = useState(false);
   const [transcript, setTranscript] = useState("");
   const [feedback, setFeedback] = useState("");
+  const [followupQuestion, setFollowupQuestion] = useState("");
   const [loading, setLoading] = useState(false);
   const [responses, setResponses] = useState<any[]>([]);
   const [complete, setComplete] = useState(false);
@@ -52,8 +54,8 @@ export default function Home() {
   };
 
   const startInterview = async () => {
-    if (!jobTitle.trim()) {
-      alert("Please enter a job title");
+    if (!jobTitle.trim() || !jobDescription.trim() || !resumeText.trim()) {
+      alert("Please provide job title, job description, and resume");
       return;
     }
     
@@ -65,13 +67,18 @@ export default function Home() {
         body: JSON.stringify({ 
           job_title: jobTitle, 
           job_description: jobDescription,
-          resume_text: resumeText,
-          question_number: questionNum 
+          resume_text: resumeText
         }),
       });
       const data = await res.json();
+      if (data.error) {
+        alert(data.error);
+        return;
+      }
+      setSessionId(data.session_id);
       setQuestion(data.question);
       setTotalQuestions(data.total_questions);
+      setQuestionNum(0);
       setStarted(true);
     } catch (err) {
       alert("Error starting interview");
@@ -103,63 +110,84 @@ export default function Home() {
     }
   };
 
+  const recognitionRef = useRef<any>(null);
+
   const startRecording = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
-      mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = [];
+      // Check if browser supports Web Speech API
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      
+      if (!SpeechRecognition) {
+        alert("Speech recognition not supported in this browser. Please use Chrome.");
+        return;
+      }
+
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
+
+      let finalTranscript = '';
+
+      recognition.onresult = (event: any) => {
+        let interimTranscript = '';
+        
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            finalTranscript += transcript + ' ';
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+        
+        setTranscript(finalTranscript + interimTranscript);
+      };
+
+      recognition.onerror = (event: any) => {
+        console.error('Speech recognition error:', event.error);
+        if (event.error === 'no-speech') {
+          alert('No speech detected. Please try again.');
+        }
+      };
+
+      recognition.onend = () => {
+        setRecording(false);
+        if (timerRef.current) clearInterval(timerRef.current);
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+      setRecording(true);
       setRecordingTime(0);
+      setTranscript('');
 
       timerRef.current = setInterval(() => {
         setRecordingTime(prev => prev + 1);
       }, 1000);
 
-      mediaRecorder.ondataavailable = (event) => {
-        audioChunksRef.current.push(event.data);
-      };
-
-      mediaRecorder.onstop = async () => {
-        if (timerRef.current) clearInterval(timerRef.current);
-        const audioBlob = new Blob(audioChunksRef.current, { type: "audio/wav" });
-        await transcribeAudio(audioBlob);
-        stream.getTracks().forEach(track => track.stop());
-      };
-
-      mediaRecorder.start();
-      setRecording(true);
     } catch (err) {
-      alert("Microphone access denied");
+      console.error('Recording error:', err);
+      alert("Microphone access denied or speech recognition not available");
     }
   };
 
   const stopRecording = () => {
-    if (mediaRecorderRef.current) {
-      mediaRecorderRef.current.stop();
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
       setRecording(false);
     }
-  };
-
-  const transcribeAudio = async (audioBlob: Blob) => {
-    setLoading(true);
-    try {
-      const formData = new FormData();
-      formData.append("audio", audioBlob, "recording.wav");
-
-      const res = await fetch("http://localhost:8000/transcribe-audio", {
-        method: "POST",
-        body: formData,
-      });
-      const data = await res.json();
-      setTranscript(data.transcript);
-    } catch (err) {
-      alert("Transcription failed");
-    } finally {
-      setLoading(false);
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
     }
   };
 
-  const submitAnswer = async () => {
+  const submitAnswer = async (requestFollowup: boolean = false) => {
+    if (!sessionId) {
+      alert("Session not initialized. Please restart the interview.");
+      return;
+    }
+    
     setLoading(true);
     try {
       const words = transcript.split(/\s+/).filter(w => w.length > 0);
@@ -168,15 +196,26 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          session_id: sessionId,
           question,
           response: transcript,
           question_type: "behavioral",
           word_count: words.length,
-          duration: recordingTime
+          duration: recordingTime,
+          request_followup: requestFollowup
         }),
       });
       const data = await res.json();
+      
+      if (data.error) {
+        alert(`Error: ${data.error}`);
+        return;
+      }
+      
       setFeedback(data.feedback);
+      if (data.followup_question) {
+        setFollowupQuestion(data.followup_question);
+      }
       
       setResponses([...responses, {
         question,
@@ -185,31 +224,61 @@ export default function Home() {
         pace_wpm: data.pace_wpm
       }]);
     } catch (err) {
-      alert("Error getting feedback");
+      console.error("Feedback error:", err);
+      alert("Error getting feedback. Check console for details.");
     } finally {
       setLoading(false);
     }
   };
 
-  const nextQuestion = () => {
-    if (questionNum >= totalQuestions) {
+  const nextQuestion = async () => {
+    if (followupQuestion) {
+      setQuestion(followupQuestion);
+      setFollowupQuestion("");
+      setTranscript("");
+      setFeedback("");
+      setRecordingTime(0);
+      return;
+    }
+    
+    if (questionNum + 1 >= totalQuestions) {
+      await fetch(`http://localhost:8000/complete-session/${sessionId}`, { method: "POST" });
       setComplete(true);
       return;
     }
     
-    setQuestionNum(questionNum + 1);
-    setTranscript("");
-    setFeedback("");
-    setRecordingTime(0);
-    startInterview();
+    setLoading(true);
+    try {
+      const res = await fetch("http://localhost:8000/get-next-question", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId, question_index: questionNum + 1 }),
+      });
+      const data = await res.json();
+      if (data.completed) {
+        setComplete(true);
+      } else {
+        setQuestion(data.question);
+        setQuestionNum(questionNum + 1);
+        setTranscript("");
+        setFeedback("");
+        setRecordingTime(0);
+      }
+    } catch (err) {
+      alert("Error loading next question");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const resetInterview = () => {
     setStarted(false);
     setComplete(false);
-    setQuestionNum(1);
+    setSessionId("");
+    setQuestionNum(0);
     setTranscript("");
     setFeedback("");
+    setFollowupQuestion("");
     setResponses([]);
     setRecordingTime(0);
   };
@@ -293,7 +362,7 @@ export default function Home() {
                   </div>
                   
                   <div>
-                    <Label htmlFor="job-desc">Job Description (Optional)</Label>
+                    <Label htmlFor="job-desc">Job Description *</Label>
                     <textarea
                       id="job-desc"
                       value={jobDescription}
@@ -306,7 +375,7 @@ export default function Home() {
                 
                 <div className="space-y-4">
                   <div>
-                    <Label htmlFor="resume">Resume (Optional)</Label>
+                    <Label htmlFor="resume">Resume *</Label>
                     <Input
                       id="resume"
                       type="file"
@@ -402,9 +471,14 @@ export default function Home() {
                   </div>
                   
                   {!feedback && (
-                    <Button onClick={submitAnswer} disabled={loading} className="w-full">
-                      Get AI Feedback
-                    </Button>
+                    <div className="space-y-2">
+                      <Button onClick={() => submitAnswer(false)} disabled={loading} className="w-full">
+                        Get AI Feedback
+                      </Button>
+                      <Button onClick={() => submitAnswer(true)} disabled={loading} variant="outline" className="w-full">
+                        Get Feedback + Follow-up Question
+                      </Button>
+                    </div>
                   )}
                 </div>
               )}
@@ -415,8 +489,14 @@ export default function Home() {
                     <p className="font-semibold mb-2">🤖 AI Feedback:</p>
                     <div className="whitespace-pre-wrap text-sm">{feedback}</div>
                   </div>
+                  {followupQuestion && (
+                    <div className="bg-yellow-50 p-4 rounded border-l-4 border-yellow-400">
+                      <p className="font-semibold mb-2">🔍 Follow-up Question:</p>
+                      <p className="text-sm">{followupQuestion}</p>
+                    </div>
+                  )}
                   <Button onClick={nextQuestion} className="w-full" size="lg">
-                    {questionNum >= totalQuestions ? "🎉 Complete Interview" : "➡️ Next Question"}
+                    {followupQuestion ? "Answer Follow-up" : questionNum + 1 >= totalQuestions ? "🎉 Complete Interview" : "➡️ Next Question"}
                   </Button>
                 </div>
               )}

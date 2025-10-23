@@ -1,7 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import boto3
 import json
 import uuid
@@ -9,6 +9,9 @@ import time
 import os
 import PyPDF2
 import io
+from interview_generator import generate_interview_questions, generate_followup_question
+from dynamodb_service import create_table_if_not_exists, create_session, add_conversation, get_session, complete_session, get_conversation_history
+from resume_parser import parse_resume, parse_job_description
 
 app = FastAPI()
 
@@ -20,6 +23,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.on_event("startup")
+async def startup_event():
+    create_table_if_not_exists()
+
 # Initialize AWS clients
 bedrock = boto3.client('bedrock-runtime', region_name='us-west-2')
 transcribe = boto3.client('transcribe', region_name='us-west-2')
@@ -30,16 +37,21 @@ BUCKET_NAME = os.getenv('S3_BUCKET', 'ai-interview-audio-temp')
 
 class InterviewRequest(BaseModel):
     job_title: str
-    job_description: Optional[str] = ""
-    resume_text: Optional[str] = ""
-    question_number: int = 1
+    job_description: str
+    resume_text: str
+
+class QuestionRequest(BaseModel):
+    session_id: str
+    question_index: int = 0
 
 class FeedbackRequest(BaseModel):
+    session_id: str
     question: str
     response: str
     question_type: str = "behavioral"
     word_count: int = 0
     duration: float = 0
+    request_followup: bool = False
 
 @app.get("/")
 def read_root():
@@ -47,18 +59,65 @@ def read_root():
 
 @app.post("/start-interview")
 def start_interview(req: InterviewRequest):
-    questions = [
-        f"Tell me about yourself and why you're interested in this {req.job_title} position.",
-        "Tell me about a time when you faced a challenging problem at work.",
-        "Describe a situation where you had to work with a difficult team member.",
-        f"Why do you want to work as a {req.job_title}?",
-        "Tell me about a time when you had to learn something new quickly."
-    ]
-    return {
-        "question": questions[req.question_number - 1], 
-        "total_questions": len(questions),
-        "question_type": "behavioral" if req.question_number > 1 else "tell_me_about"
-    }
+    try:
+        resume_data = parse_resume(req.resume_text) if req.resume_text else {"error": "No resume"}
+        job_data = parse_job_description(req.job_description, req.job_title) if req.job_description else {"title": req.job_title}
+        
+        questions_result = generate_interview_questions(resume_data, job_data)
+        
+        if "error" in questions_result:
+            all_questions = [
+                f"Tell me about your experience relevant to this {req.job_title} position.",
+                "Describe a challenging technical problem you've solved.",
+                "Tell me about a time you worked in a team to deliver a project.",
+                "Describe a situation where you had to handle a difficult deadline.",
+                "Give me an example of when you had to learn something new quickly."
+            ]
+        else:
+            # Ensure we get both technical and behavioral questions
+            tech_questions = questions_result.get('technical_questions', [])
+            behavioral_questions = questions_result.get('behavioral_questions', [])
+            
+            # Combine: behavioral first, then technical (for better flow)
+            all_questions = behavioral_questions + tech_questions
+            
+            # Fallback if parsing failed
+            if len(all_questions) < 3:
+                all_questions = [
+                    f"Tell me about your experience with the key responsibilities in this {req.job_title} role.",
+                    "Describe a challenging situation you faced and how you resolved it.",
+                    "Tell me about a time you collaborated with a team to achieve a goal.",
+                    "How do you approach problem-solving in your work?",
+                    "Give me an example of a project you're proud of and why."
+                ]
+        
+        session_id = create_session(req.job_title, req.job_description, req.resume_text)
+        
+        from dynamodb_service import dynamodb, TABLE_NAME
+        table = dynamodb.Table(TABLE_NAME)
+        table.update_item(
+            Key={'session_id': session_id},
+            UpdateExpression='SET questions = :q, resume_data = :r, job_data = :j',
+            ExpressionAttributeValues={':q': all_questions, ':r': resume_data, ':j': job_data}
+        )
+        
+        # Determine question type based on content
+        first_question = all_questions[0]
+        question_type = "behavioral" if any(phrase in first_question.lower() for phrase in ["tell me about", "describe a", "give me an example"]) else "technical"
+        
+        return {
+            "session_id": session_id,
+            "question": first_question,
+            "total_questions": len(all_questions),
+            "question_type": question_type,
+            "debug_info": {
+                "tech_count": len(questions_result.get('technical_questions', [])),
+                "behavioral_count": len(questions_result.get('behavioral_questions', [])),
+                "rationale": questions_result.get('rationale', 'N/A')
+            }
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.post("/upload-resume")
 async def upload_resume(file: UploadFile = File(...)):
@@ -132,11 +191,11 @@ async def transcribe_audio(audio: UploadFile = File(...)):
 
 @app.post("/get-feedback")
 def get_feedback(req: FeedbackRequest):
-    # Calculate metrics
-    pace_wpm = int((req.word_count / req.duration) * 60) if req.duration > 0 else 0
-    pace_assessment = 'good' if 120 <= pace_wpm <= 160 else 'slow' if pace_wpm < 120 else 'fast'
-    
-    prompt = f"""You are an expert interview coach. Analyze this interview response.
+    try:
+        pace_wpm = int((req.word_count / req.duration) * 60) if req.duration > 0 else 0
+        pace_assessment = 'good' if 120 <= pace_wpm <= 160 else 'slow' if pace_wpm < 120 else 'fast'
+        
+        prompt = f"""You are an expert interview coach. Analyze this interview response.
 
 Question: {req.question}
 Question Type: {req.question_type}
@@ -164,26 +223,26 @@ Provide feedback in this format:
 **Score: X/10**
 
 Be constructive, specific, and encouraging."""
-    
-    try:
-        request_body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 1000,
-            "temperature": 0.7,
-            "messages": [{"role": "user", "content": prompt}]
-        }
         
-        response = bedrock.invoke_model(
-            modelId='anthropic.claude-3-5-sonnet-20241022-v2:0',
-            body=json.dumps(request_body)
-        )
-        
-        response_body = json.loads(response['body'].read())
-        feedback = response_body['content'][0]['text']
-    except:
-        # Fallback feedback
-        score = 7 if req.word_count > 50 else 4
-        feedback = f"""**Content Analysis:**
+        try:
+            request_body = {
+                "anthropic_version": "bedrock-2023-05-31",
+                "max_tokens": 1000,
+                "temperature": 0.7,
+                "messages": [{"role": "user", "content": prompt}]
+            }
+            
+            response = bedrock.invoke_model(
+                modelId='anthropic.claude-3-5-sonnet-20241022-v2:0',
+                body=json.dumps(request_body)
+            )
+            
+            response_body = json.loads(response['body'].read())
+            feedback = response_body['content'][0]['text']
+        except Exception as bedrock_error:
+            print(f"Bedrock error: {bedrock_error}")
+            score = 7 if req.word_count > 50 else 4
+            feedback = f"""**Content Analysis:**
 Response length: {req.word_count} words. {'Good detail level.' if req.word_count > 50 else 'Too brief - expand with examples.'}
 
 **Delivery Assessment:**
@@ -198,5 +257,65 @@ Pace: {pace_wpm} WPM ({pace_assessment})
 • Include quantifiable results
 
 **Score: {score}/10**"""
+        
+        metrics = {"word_count": req.word_count, "duration": req.duration, "pace_wpm": pace_wpm, "pace_assessment": pace_assessment}
+        
+        # Store conversation in DynamoDB
+        try:
+            add_conversation(req.session_id, req.question, req.response, feedback, metrics)
+        except Exception as db_error:
+            print(f"DynamoDB error: {db_error}")
+            # Continue even if storage fails
+        
+        followup_question = None
+        if req.request_followup:
+            try:
+                session = get_session(req.session_id)
+                job_context = f"{session.get('job_title', '')} - {session.get('job_description', '')[:200]}"
+                followup_question = generate_followup_question(req.question, req.response, job_context)
+            except Exception as followup_error:
+                print(f"Follow-up generation error: {followup_error}")
+        
+        return {"feedback": feedback, "pace_wpm": pace_wpm, "pace_assessment": pace_assessment, "followup_question": followup_question}
     
-    return {"feedback": feedback, "pace_wpm": pace_wpm, "pace_assessment": pace_assessment}
+    except Exception as e:
+        print(f"Error in get_feedback: {e}")
+        return {"error": str(e)}
+
+
+@app.post("/get-next-question")
+def get_next_question(req: QuestionRequest):
+    """Get next question from session"""
+    try:
+        session = get_session(req.session_id)
+        questions = session.get('questions', [])
+        
+        if req.question_index >= len(questions):
+            return {"completed": True, "message": "Interview completed"}
+        
+        return {
+            "question": questions[req.question_index],
+            "question_index": req.question_index,
+            "total_questions": len(questions),
+            "completed": False
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/session/{session_id}")
+def get_session_data(session_id: str):
+    """Get full session data including all conversations"""
+    try:
+        session = get_session(session_id)
+        return session
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/complete-session/{session_id}")
+def finish_session(session_id: str):
+    """Mark session as complete"""
+    try:
+        complete_session(session_id)
+        return {"message": "Session completed", "session_id": session_id}
+    except Exception as e:
+        return {"error": str(e)}
