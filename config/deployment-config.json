@@ -1,0 +1,8 @@
+{
+  "environment": "dev",
+  "region": "us-west-2",
+  "apiEndpoint": "https://mlwoyrblv3.execute-api.us-west-2.amazonaws.com/dev",
+  "audioBucket": "",
+  "resumeBucket": "",
+  "sessionsTable": ""
+}

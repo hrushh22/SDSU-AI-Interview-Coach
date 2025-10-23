@@ -1,0 +1,406 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AI Interview Coach - Enhanced Stack with Proper Question Cycling'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+
+Resources:
+  # DynamoDB Table
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'InterviewSessions-${Environment}-${AWS::AccountId}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # Lambda Execution Role
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                Resource: !GetAtt SessionsTable.Arn
+
+  # Enhanced Interview Function
+  InterviewFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'interview-orchestrator-${Environment}'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          SESSIONS_TABLE: !Ref SessionsTable
+          MOCK_MODE: 'false'
+      Code:
+        ZipFile: |
+          import json
+          import uuid
+          import boto3
+          import os
+          from datetime import datetime
+          
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table(os.environ['SESSIONS_TABLE'])
+          
+          # Question bank with proper cycling
+          QUESTIONS = [
+              {
+                  "question": "Tell me about yourself.",
+                  "type": "tell_me_about",
+                  "competency": "self_presentation",
+                  "expected_duration": "1-2 minutes"
+              },
+              {
+                  "question": "Tell me about a time when you faced a challenging problem at work. How did you solve it?",
+                  "type": "behavioral",
+                  "competency": "problem_solving",
+                  "expected_duration": "2-3 minutes"
+              },
+              {
+                  "question": "Describe a situation where you had to work with a difficult team member. How did you handle it?",
+                  "type": "behavioral", 
+                  "competency": "teamwork",
+                  "expected_duration": "2-3 minutes"
+              },
+              {
+                  "question": "Why do you want this job?",
+                  "type": "why_this_job",
+                  "competency": "motivation",
+                  "expected_duration": "1-2 minutes"
+              },
+              {
+                  "question": "Tell me about a time when you had to learn something new quickly.",
+                  "type": "behavioral",
+                  "competency": "adaptability", 
+                  "expected_duration": "2-3 minutes"
+              }
+          ]
+          
+          def lambda_handler(event, context):
+              try:
+                  body = json.loads(event.get('body', '{}'))
+                  action = body.get('action')
+                  
+                  if action == 'start_session':
+                      session_id = str(uuid.uuid4())
+                      job_title = body.get('job_title', 'Software Engineer')
+                      job_description = body.get('job_description', '')
+                      
+                      # Store session in DynamoDB
+                      session_data = {
+                          'session_id': session_id,
+                          'job_title': job_title,
+                          'job_description': job_description,
+                          'current_question_index': 0,
+                          'questions_asked': 0,
+                          'total_questions': len(QUESTIONS),
+                          'status': 'active',
+                          'created_at': datetime.utcnow().isoformat(),
+                          'responses': []
+                      }
+                      
+                      table.put_item(Item=session_data)
+                      
+                      return {
+                          'statusCode': 200,
+                          'headers': {
+                              'Content-Type': 'application/json',
+                              'Access-Control-Allow-Origin': '*'
+                          },
+                          'body': json.dumps({
+                              'session_id': session_id,
+                              'status': 'active',
+                              'total_questions': len(QUESTIONS)
+                          })
+                      }
+                      
+                  elif action == 'get_question':
+                      session_id = body.get('session_id')
+                      
+                      # Get session from DynamoDB
+                      response = table.get_item(Key={'session_id': session_id})
+                      if 'Item' not in response:
+                          return {
+                              'statusCode': 404,
+                              'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                              'body': json.dumps({'error': 'Session not found'})
+                          }
+                      
+                      session = response['Item']
+                      current_index = int(session.get('current_question_index', 0))
+                      
+                      # Check if interview is complete
+                      if current_index >= len(QUESTIONS):
+                          return {
+                              'statusCode': 200,
+                              'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                              'body': json.dumps({'completed': True, 'message': 'Interview complete'})
+                          }
+                      
+                      # Get current question
+                      question_data = QUESTIONS[current_index].copy()
+                      question_data['question_number'] = current_index + 1
+                      
+                      # Customize question based on job description if available
+                      job_description = session.get('job_description', '')
+                      if job_description and 'software' in job_description.lower():
+                          if question_data['type'] == 'behavioral' and 'problem' in question_data['question']:
+                              question_data['question'] = "Tell me about a time when you had to debug a complex technical issue. How did you approach it?"
+                      
+                      return {
+                          'statusCode': 200,
+                          'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                          'body': json.dumps(question_data)
+                      }
+                      
+                  elif action == 'next_question':
+                      session_id = body.get('session_id')
+                      
+                      # Update session to next question
+                      table.update_item(
+                          Key={'session_id': session_id},
+                          UpdateExpression='SET current_question_index = current_question_index + :inc',
+                          ExpressionAttributeValues={':inc': 1}
+                      )
+                      
+                      return {
+                          'statusCode': 200,
+                          'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                          'body': json.dumps({'success': True})
+                      }
+                      
+                  else:
+                      return {
+                          'statusCode': 400,
+                          'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                          'body': json.dumps({'error': 'Invalid action'})
+                      }
+                      
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps({'error': str(e)})
+                  }
+
+  # Enhanced Feedback Function
+  FeedbackFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'feedback-generator-${Environment}'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !GetAtt LambdaRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          
+          dynamodb = boto3.resource('dynamodb')
+          table = dynamodb.Table(os.environ['SESSIONS_TABLE'])
+          
+          def lambda_handler(event, context):
+              try:
+                  body = json.loads(event.get('body', '{}'))
+                  
+                  session_id = body.get('session_id')
+                  question = body.get('question', '')
+                  response_text = body.get('response_text', '')
+                  question_type = body.get('question_type', 'behavioral')
+                  metrics = body.get('metrics', {})
+                  job_description = body.get('job_description', '')
+                  resume_text = body.get('resume_text', '')
+                  
+                  # Generate contextual feedback based on question type and job
+                  feedback = generate_feedback(question, response_text, question_type, job_description, resume_text, metrics)
+                  
+                  # Store response in session
+                  response_data = {
+                      'question': question,
+                      'response': response_text,
+                      'feedback': feedback,
+                      'metrics': metrics,
+                      'timestamp': datetime.utcnow().isoformat()
+                  }
+                  
+                  # Update session with response
+                  table.update_item(
+                      Key={'session_id': session_id},
+                      UpdateExpression='SET responses = list_append(if_not_exists(responses, :empty_list), :new_response)',
+                      ExpressionAttributeValues={
+                          ':new_response': [response_data],
+                          ':empty_list': []
+                      }
+                  )
+                  
+                  return {
+                      'statusCode': 200,
+                      'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps({'feedback': feedback})
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'headers': {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*'},
+                      'body': json.dumps({'error': str(e)})
+                  }
+          
+          def generate_feedback(question, response, question_type, job_desc, resume, metrics):
+              """Generate contextual feedback based on response and context"""
+              
+              feedback_parts = []
+              
+              # Analyze delivery metrics
+              pace_wpm = metrics.get('pace_wpm', 0)
+              filler_rate = metrics.get('filler_rate', 0)
+              word_count = metrics.get('word_count', 0)
+              
+              # Delivery feedback
+              if pace_wpm < 120:
+                  feedback_parts.append("**Delivery:** Speak a bit faster - aim for 120-160 WPM for better engagement.")
+              elif pace_wpm > 160:
+                  feedback_parts.append("**Delivery:** Slow down slightly - you're speaking quite fast which may reduce clarity.")
+              else:
+                  feedback_parts.append("**Delivery:** Great speaking pace! You're in the optimal 120-160 WPM range.")
+              
+              if filler_rate > 5:
+                  feedback_parts.append("**Filler Words:** Try to reduce 'um', 'uh', and 'like' - practice pausing instead.")
+              elif filler_rate < 2:
+                  feedback_parts.append("**Filler Words:** Excellent! Very few filler words - shows confidence.")
+              
+              # Content feedback based on question type
+              if question_type == 'behavioral':
+                  if 'situation' in response.lower() or 'task' in response.lower():
+                      feedback_parts.append("**STAR Structure:** Good use of STAR method elements!")
+                  else:
+                      feedback_parts.append("**STAR Structure:** Try using STAR method - Situation, Task, Action, Result.")
+                  
+                  if any(word in response.lower() for word in ['increased', 'decreased', 'improved', '%', 'dollars']):
+                      feedback_parts.append("**Metrics:** Excellent use of quantifiable results!")
+                  else:
+                      feedback_parts.append("**Metrics:** Add specific numbers or percentages to strengthen your impact.")
+              
+              elif question_type == 'tell_me_about':
+                  if word_count < 50:
+                      feedback_parts.append("**Length:** Your response is quite brief - aim for 1-2 minutes to fully showcase yourself.")
+                  elif word_count > 200:
+                      feedback_parts.append("**Length:** Good detail, but keep it concise - focus on most relevant points.")
+                  
+                  if job_desc and any(skill in response.lower() for skill in ['python', 'java', 'aws', 'react']):
+                      feedback_parts.append("**Job Relevance:** Great job connecting your skills to the role!")
+              
+              elif question_type == 'why_this_job':
+                  if job_desc and any(word in job_desc.lower() for word in response.lower().split()[:10]):
+                      feedback_parts.append("**Research:** Shows good knowledge of the company/role!")
+                  else:
+                      feedback_parts.append("**Research:** Demonstrate more specific knowledge about this company and role.")
+              
+              # Resume matching
+              if resume and any(skill in resume.lower() for skill in response.lower().split()):
+                  feedback_parts.append("**Consistency:** Good alignment with your resume experience!")
+              
+              return " ".join(feedback_parts)
+
+  # API Gateway (same as before)
+  ApiGateway:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub 'interview-coach-api-${Environment}'
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowMethods: ['*']
+        AllowHeaders: ['*']
+
+  InterviewIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${InterviewFunction.Arn}/invocations'
+      PayloadFormatVersion: '2.0'
+
+  FeedbackIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref ApiGateway
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FeedbackFunction.Arn}/invocations'
+      PayloadFormatVersion: '2.0'
+
+  InterviewRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: 'POST /interview'
+      Target: !Sub 'integrations/${InterviewIntegration}'
+
+  FeedbackRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref ApiGateway
+      RouteKey: 'POST /feedback'
+      Target: !Sub 'integrations/${FeedbackIntegration}'
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref ApiGateway
+      StageName: dev
+      AutoDeploy: true
+
+  # Lambda Permissions
+  InterviewPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InterviewFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*'
+
+  FeedbackPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FeedbackFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*'
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${ApiGateway}.execute-api.${AWS::Region}.amazonaws.com/dev'

@@ -1,0 +1,42 @@
+# Secrets and credentials
+.streamlit/secrets.toml
+backend_api/start.sh
+start_backend.bat
+setup_s3.bat
+*.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+.pytest_cache/
+
+# Next.js
+frontend/.next/
+frontend/out/
+frontend/node_modules/
+frontend/.env*.local
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# AWS
+aws/
+
+# Temp files
+*.log
+temp_clone/

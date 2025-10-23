@@ -1,0 +1,402 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AI Interview Coach - Complete Infrastructure'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    Description: Environment name
+    AllowedValues:
+      - dev
+      - prod
+
+Resources:
+  # ==================== S3 Buckets ====================
+  AudioBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'interview-coach-audio-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+            AllowedOrigins:
+              - '*'
+            MaxAge: 3000
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldAudio
+            Status: Enabled
+            ExpirationInDays: 30
+
+  ResumeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'interview-coach-resumes-${Environment}-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders:
+              - '*'
+            AllowedMethods:
+              - GET
+              - PUT
+              - POST
+            AllowedOrigins:
+              - '*'
+            MaxAge: 3000
+
+  # ==================== DynamoDB Table ====================
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub 'InterviewSessions-${Environment}'
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: CreatedAtIndex
+          KeySchema:
+            - AttributeName: created_at
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # ==================== IAM Roles ====================
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'InterviewCoachLambdaRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+        - PolicyName: InterviewCoachLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                Resource:
+                  - !Sub '${AudioBucket.Arn}/*'
+                  - !Sub '${ResumeBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - 'dynamodb:GetItem'
+                  - 'dynamodb:PutItem'
+                  - 'dynamodb:UpdateItem'
+                  - 'dynamodb:Query'
+                  - 'dynamodb:Scan'
+                Resource:
+                  - !GetAtt SessionsTable.Arn
+                  - !Sub '${SessionsTable.Arn}/index/*'
+              - Effect: Allow
+                Action:
+                  - 'transcribe:StartTranscriptionJob'
+                  - 'transcribe:GetTranscriptionJob'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'polly:SynthesizeSpeech'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'textract:DetectDocumentText'
+                  - 'textract:StartDocumentTextDetection'
+                  - 'textract:GetDocumentTextDetection'
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - 'bedrock:InvokeModel'
+                Resource: 
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-5-sonnet-*'
+              - Effect: Allow
+                Action:
+                  - 'lambda:InvokeFunction'
+                Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:interview-*'
+
+  # ==================== Lambda Functions ====================
+  InterviewOrchestratorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'interview-orchestrator-${Environment}'
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 512
+      Environment:
+        Variables:
+          AWS_REGION: !Ref AWS::Region
+          SESSIONS_TABLE: !Ref SessionsTable
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': 'Placeholder'}
+
+  AudioProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'audio-processor-${Environment}'
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          AWS_REGION: !Ref AWS::Region
+          AUDIO_BUCKET: !Ref AudioBucket
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': 'Placeholder'}
+
+  ResumeAnalyzerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'resume-analyzer-${Environment}'
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          AWS_REGION: !Ref AWS::Region
+          RESUME_BUCKET: !Ref ResumeBucket
+          SESSIONS_TABLE: !Ref SessionsTable
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': 'Placeholder'}
+
+  FeedbackGeneratorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'feedback-generator-${Environment}'
+      Runtime: python3.11
+      Handler: handler.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Timeout: 300
+      MemorySize: 1024
+      Environment:
+        Variables:
+          AWS_REGION: !Ref AWS::Region
+          SESSIONS_TABLE: !Ref SessionsTable
+          ENVIRONMENT: !Ref Environment
+      Code:
+        ZipFile: |
+          def lambda_handler(event, context):
+              return {'statusCode': 200, 'body': 'Placeholder'}
+
+  # ==================== API Gateway ====================
+  InterviewCoachAPI:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub 'interview-coach-api-${Environment}'
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - '*'
+        MaxAge: 300
+
+  ApiIntegrationOrchestrator:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref InterviewCoachAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${InterviewOrchestratorFunction.Arn}/invocations'
+      PayloadFormatVersion: '2.0'
+
+  ApiIntegrationAudio:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref InterviewCoachAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AudioProcessorFunction.Arn}/invocations'
+      PayloadFormatVersion: '2.0'
+
+  ApiIntegrationResume:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref InterviewCoachAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ResumeAnalyzerFunction.Arn}/invocations'
+      PayloadFormatVersion: '2.0'
+
+  ApiIntegrationFeedback:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref InterviewCoachAPI
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FeedbackGeneratorFunction.Arn}/invocations'
+      PayloadFormatVersion: '2.0'
+
+  # API Routes
+  RouteInterview:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref InterviewCoachAPI
+      RouteKey: 'POST /interview'
+      Target: !Sub 'integrations/${ApiIntegrationOrchestrator}'
+
+  RouteAudio:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref InterviewCoachAPI
+      RouteKey: 'POST /audio'
+      Target: !Sub 'integrations/${ApiIntegrationAudio}'
+
+  RouteResume:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref InterviewCoachAPI
+      RouteKey: 'POST /resume'
+      Target: !Sub 'integrations/${ApiIntegrationResume}'
+
+  RouteFeedback:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref InterviewCoachAPI
+      RouteKey: 'POST /feedback'
+      Target: !Sub 'integrations/${ApiIntegrationFeedback}'
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref InterviewCoachAPI
+      StageName: !Ref Environment
+      AutoDeploy: true
+
+  # Lambda Permissions for API Gateway
+  LambdaPermissionOrchestrator:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InterviewOrchestratorFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${InterviewCoachAPI}/*'
+
+  LambdaPermissionAudio:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AudioProcessorFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${InterviewCoachAPI}/*'
+
+  LambdaPermissionResume:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ResumeAnalyzerFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${InterviewCoachAPI}/*'
+
+  LambdaPermissionFeedback:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref FeedbackGeneratorFunction
+      Action: 'lambda:InvokeFunction'
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${InterviewCoachAPI}/*'
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub 'https://${InterviewCoachAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApiEndpoint'
+
+  AudioBucketName:
+    Description: S3 bucket for audio files
+    Value: !Ref AudioBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-AudioBucket'
+
+  ResumeBucketName:
+    Description: S3 bucket for resumes
+    Value: !Ref ResumeBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ResumeBucket'
+
+  SessionsTableName:
+    Description: DynamoDB table for sessions
+    Value: !Ref SessionsTable
+    Export:
+      Name: !Sub '${AWS::StackName}-SessionsTable'
+
+  OrchestratorFunctionArn:
+    Description: Interview Orchestrator Lambda ARN
+    Value: !GetAtt InterviewOrchestratorFunction.Arn
+
+  AudioProcessorFunctionArn:
+    Description: Audio Processor Lambda ARN
+    Value: !GetAtt AudioProcessorFunction.Arn
+
+  ResumeAnalyzerFunctionArn:
+    Description: Resume Analyzer Lambda ARN
+    Value: !GetAtt ResumeAnalyzerFunction.Arn
+
+  FeedbackGeneratorFunctionArn:
+    Description: Feedback Generator Lambda ARN
+    Value: !GetAtt FeedbackGeneratorFunction.Arn
