@@ -9,9 +9,12 @@ import time
 import os
 import PyPDF2
 import io
+from dotenv import load_dotenv
 from interview_generator import generate_interview_questions, generate_followup_question
 from dynamodb_service import create_table_if_not_exists, create_session, add_conversation, get_session, complete_session, get_conversation_history
 from resume_parser import parse_resume, parse_job_description
+
+load_dotenv()
 
 app = FastAPI()
 
@@ -220,9 +223,15 @@ Provide feedback in this format:
 **Areas for Improvement:**
 [2-3 specific suggestions with examples]
 
+**Expected Answer:**
+[Provide a brief example of what a strong answer would include]
+
 **Score: X/10**
 
 Be constructive, specific, and encouraging."""
+        
+        score = 5
+        expected_answer = "A strong answer would include specific examples using the STAR method, quantifiable results, and clear demonstration of relevant skills."
         
         try:
             request_body = {
@@ -239,6 +248,18 @@ Be constructive, specific, and encouraging."""
             
             response_body = json.loads(response['body'].read())
             feedback = response_body['content'][0]['text']
+            
+            # Extract score from feedback
+            import re
+            score_match = re.search(r'\*\*Score:\s*(\d+)/10\*\*', feedback)
+            if score_match:
+                score = int(score_match.group(1))
+            
+            # Extract expected answer
+            expected_match = re.search(r'\*\*Expected Answer:\*\*\s*([^*]+)', feedback, re.DOTALL)
+            if expected_match:
+                expected_answer = expected_match.group(1).strip()
+                
         except Exception as bedrock_error:
             print(f"Bedrock error: {bedrock_error}")
             score = 7 if req.word_count > 50 else 4
@@ -255,6 +276,9 @@ Pace: {pace_wpm} WPM ({pace_assessment})
 **Areas for Improvement:**
 • Add specific examples with STAR method
 • Include quantifiable results
+
+**Expected Answer:**
+{expected_answer}
 
 **Score: {score}/10**"""
         
@@ -276,7 +300,14 @@ Pace: {pace_wpm} WPM ({pace_assessment})
             except Exception as followup_error:
                 print(f"Follow-up generation error: {followup_error}")
         
-        return {"feedback": feedback, "pace_wpm": pace_wpm, "pace_assessment": pace_assessment, "followup_question": followup_question}
+        return {
+            "feedback": feedback,
+            "pace_wpm": pace_wpm,
+            "pace_assessment": pace_assessment,
+            "followup_question": followup_question,
+            "score": score,
+            "expected_answer": expected_answer
+        }
     
     except Exception as e:
         print(f"Error in get_feedback: {e}")
