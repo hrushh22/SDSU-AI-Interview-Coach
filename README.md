@@ -2,6 +2,7 @@
 
 AWS-powered mock interview system with real-time AI feedback, body language analysis, and text-to-speech using Next.js + FastAPI.
 
+Demo Link: https://www.loom.com/share/bd5e358b90c442109c3aa8a7803fd06f
 ## Features
 
 ### Interview Modes
