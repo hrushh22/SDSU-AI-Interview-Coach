@@ -26,10 +26,19 @@ export function MockInterview({ onBack }: MockInterviewProps) {
   const [totalTime, setTotalTime] = useState(0);
   const [timerStarted, setTimerStarted] = useState(false);
   const [playingAudio, setPlayingAudio] = useState(false);
+  const [bodyLanguageEnabled, setBodyLanguageEnabled] = useState(true);
+  const [bodyLanguageAlerts, setBodyLanguageAlerts] = useState<any[]>([]);
+  const [bodyLanguageReport, setBodyLanguageReport] = useState<any>(null);
+  const [showAlert, setShowAlert] = useState(false);
+  const [currentAlert, setCurrentAlert] = useState("");
+  const [captureCount, setCaptureCount] = useState(0);
   const recognitionRef = useRef<any>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const totalTimerRef = useRef<NodeJS.Timeout | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const bodyLanguageTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const MAX_TIME = 600; // 10 minutes
 
@@ -49,6 +58,106 @@ export function MockInterview({ onBack }: MockInterviewProps) {
       if (totalTimerRef.current) clearInterval(totalTimerRef.current);
     };
   }, [timerStarted]);
+
+  useEffect(() => {
+    if (step === "interview" && bodyLanguageEnabled && sessionId) {
+      startWebcam();
+      setTimeout(() => {
+        captureAndAnalyzeFrame();
+        bodyLanguageTimerRef.current = setInterval(() => {
+          captureAndAnalyzeFrame();
+        }, 5000);
+      }, 3000);
+    }
+    return () => {
+      if (bodyLanguageTimerRef.current) clearInterval(bodyLanguageTimerRef.current);
+      stopWebcam();
+    };
+  }, [step, bodyLanguageEnabled, sessionId]);
+
+  const startWebcam = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+      }
+    } catch (err) {
+      console.error("Webcam error:", err);
+      setBodyLanguageEnabled(false);
+    }
+  };
+
+  const stopWebcam = () => {
+    if (videoRef.current?.srcObject) {
+      const stream = videoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(track => track.stop());
+    }
+  };
+
+  const captureAndAnalyzeFrame = async () => {
+    if (!videoRef.current || !canvasRef.current || !sessionId) {
+      console.log("Skipping capture - missing refs or sessionId");
+      return;
+    }
+    
+    const video = videoRef.current;
+    if (video.readyState !== video.HAVE_ENOUGH_DATA) {
+      console.log("Video not ready yet");
+      return;
+    }
+    
+    const canvas = canvasRef.current;
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const imageData = canvas.toDataURL('image/jpeg', 0.7);
+    const base64Image = imageData.split(',')[1];
+    
+    if (!base64Image || base64Image.length < 100) {
+      console.log("Invalid image data");
+      return;
+    }
+    
+    console.log(`Capturing frame #${captureCount + 1} at ${totalTime}s`);
+    setCaptureCount(prev => prev + 1);
+    
+    try {
+      const res = await fetch("http://localhost:8000/analyze-body-language", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: sessionId,
+          image_base64: base64Image,
+          timestamp: totalTime,
+          question: questions[currentQuestionIndex] || "",
+          question_type: "behavioral",
+          user_state: recording ? "speaking" : "listening"
+        }),
+      });
+      const data = await res.json();
+      const severity = data.severity_level || "low";
+      const tip = data.actionable_tip || "";
+      console.log(`${severity === 'high' ? '🚨' : severity === 'medium' ? '⚠️' : '✅'} [${totalTime}s] ${severity.toUpperCase()}: ${tip}`);
+      
+      if (!data.error) {
+        if (severity === "high" || severity === "medium") {
+          const alertMsg = tip || "Check your posture and eye contact";
+          setBodyLanguageAlerts(prev => [...prev, { timestamp: totalTime, tip: alertMsg, severity }]);
+          setCurrentAlert(alertMsg);
+          setShowAlert(true);
+          setTimeout(() => setShowAlert(false), severity === "high" ? 8000 : 5000);
+        }
+      } else {
+        console.error("Body language API error:", data.error);
+      }
+    } catch (err) {
+      console.error("Body language analysis error:", err);
+    }
+  };
 
   const handleResumeUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -181,6 +290,8 @@ export function MockInterview({ onBack }: MockInterviewProps) {
 
   const endInterview = async () => {
     if (totalTimerRef.current) clearInterval(totalTimerRef.current);
+    if (bodyLanguageTimerRef.current) clearInterval(bodyLanguageTimerRef.current);
+    stopWebcam();
     setLoading(true);
     const allResponses = transcript ? [...responses, { question: questions[currentQuestionIndex], response: transcript, time: recordingTime }] : responses;
     
@@ -208,6 +319,24 @@ export function MockInterview({ onBack }: MockInterviewProps) {
 
     const responsesWithFeedback = await Promise.all(feedbackPromises);
     setResponses(responsesWithFeedback);
+    
+    // Get body language report
+    if (bodyLanguageEnabled && sessionId) {
+      try {
+        console.log("Fetching body language report for session:", sessionId);
+        const blRes = await fetch(`http://localhost:8000/body-language-report/${sessionId}`);
+        const blData = await blRes.json();
+        console.log("Body language report received:", blData);
+        if (!blData.error && blData.overall_scores) {
+          setBodyLanguageReport(blData);
+        } else {
+          console.log("No body language data or error:", blData);
+        }
+      } catch (err) {
+        console.error("Error fetching body language report:", err);
+      }
+    }
+    
     await fetch(`http://localhost:8000/complete-session/${sessionId}`, { method: "POST" });
     setStep("complete");
     setLoading(false);
@@ -276,6 +405,59 @@ export function MockInterview({ onBack }: MockInterviewProps) {
                 </CardContent>
               </Card>
 
+              {bodyLanguageReport && bodyLanguageReport.overall_scores && (
+                <Card className="bg-gradient-to-br from-indigo-50 to-purple-50 border-2 border-indigo-200">
+                  <CardHeader>
+                    <CardTitle className="text-xl text-indigo-700">📹 Body Language Analysis</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="bg-white p-4 rounded-lg">
+                        <p className="text-sm text-gray-600">Eye Contact</p>
+                        <p className="text-2xl font-bold text-indigo-600">{bodyLanguageReport.overall_scores.eye_contact}/10</p>
+                      </div>
+                      <div className="bg-white p-4 rounded-lg">
+                        <p className="text-sm text-gray-600">Posture</p>
+                        <p className="text-2xl font-bold text-indigo-600">{bodyLanguageReport.overall_scores.posture}/10</p>
+                      </div>
+                      <div className="bg-white p-4 rounded-lg">
+                        <p className="text-sm text-gray-600">Engagement</p>
+                        <p className="text-2xl font-bold text-indigo-600">{bodyLanguageReport.overall_scores.engagement}/10</p>
+                      </div>
+                      <div className="bg-white p-4 rounded-lg">
+                        <p className="text-sm text-gray-600">Professionalism</p>
+                        <p className="text-2xl font-bold text-indigo-600">{bodyLanguageReport.overall_scores.professionalism}/10</p>
+                      </div>
+                    </div>
+                    {bodyLanguageReport.top_strengths?.length > 0 && (
+                      <div>
+                        <p className="font-semibold text-sm mb-2">💪 Body Language Strengths:</p>
+                        <ul className="space-y-1">
+                          {bodyLanguageReport.top_strengths.map((s: string, i: number) => (
+                            <li key={i} className="text-sm flex items-center gap-2">
+                              <span className="text-green-600">✓</span>{s}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {bodyLanguageReport.top_improvements?.length > 0 && (
+                      <div>
+                        <p className="font-semibold text-sm mb-2">⚠️ Body Language Improvements:</p>
+                        <ul className="space-y-1">
+                          {bodyLanguageReport.top_improvements.map((i: string, idx: number) => (
+                            <li key={idx} className="text-sm flex items-center gap-2">
+                              <span className="text-orange-600">→</span>{i}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    <p className="text-xs text-gray-500">Analyzed {bodyLanguageReport.total_frames_analyzed} frames during interview</p>
+                  </CardContent>
+                </Card>
+              )}
+
               <div className="space-y-4">
                 <h3 className="font-semibold text-xl">📊 Question-by-Question Analysis</h3>
                 {responses.map((r, i) => (
@@ -328,6 +510,23 @@ export function MockInterview({ onBack }: MockInterviewProps) {
             </div>
           </div>
 
+          {showAlert && currentAlert && (
+            <div className="fixed top-20 right-8 z-50 animate-pulse">
+              <Card className="bg-gradient-to-r from-red-500 to-orange-500 border-4 border-red-600 shadow-2xl max-w-md">
+                <CardContent className="py-4 px-6">
+                  <div className="flex items-center gap-3">
+                    <span className="text-4xl animate-bounce">🚨</span>
+                    <div className="flex-1">
+                      <p className="text-white font-bold text-lg">IMMEDIATE ACTION!</p>
+                      <p className="text-white font-semibold text-sm">{currentAlert}</p>
+                    </div>
+                    <button onClick={() => setShowAlert(false)} className="text-white text-2xl hover:text-gray-200">×</button>
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+          )}
+
           <Card>
             <CardHeader className="bg-gradient-to-r from-purple-50 to-pink-50">
               <CardTitle className="text-xl flex items-center justify-between">
@@ -338,6 +537,29 @@ export function MockInterview({ onBack }: MockInterviewProps) {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4 pt-6">
+              {bodyLanguageEnabled && (
+                <div className="bg-gradient-to-r from-indigo-50 to-purple-50 p-4 rounded-lg border-2 border-indigo-300 shadow-md">
+                  <div className="flex items-center gap-4">
+                    <div className="relative">
+                      <video ref={videoRef} autoPlay playsInline className="w-48 h-36 rounded-lg border-2 border-indigo-400 object-cover shadow-lg" muted />
+                      <div className="absolute top-2 right-2 bg-red-500 rounded-full w-3 h-3 animate-pulse"></div>
+                      <div className="absolute bottom-2 left-2 bg-black bg-opacity-60 text-white text-xs px-2 py-1 rounded">🔴 LIVE</div>
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-base font-bold text-indigo-900 flex items-center gap-2">
+                        <span className="text-2xl">👁️</span> AI Monitoring Active
+                      </p>
+                      <p className="text-sm text-indigo-700 mt-1">Analyzing posture, eye contact, and engagement</p>
+                      <div className="mt-2 flex gap-2 flex-wrap">
+                        <span className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded flex items-center gap-1">
+                          <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span> Active
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                  <canvas ref={canvasRef} className="hidden" />
+                </div>
+              )}
               {!recording && !transcript && (
                 <Button onClick={startRecording} className="w-full py-8 text-lg bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600">
                   🎤 Start Recording Answer
@@ -394,6 +616,18 @@ export function MockInterview({ onBack }: MockInterviewProps) {
           </CardHeader>
           <CardContent className="space-y-6 pt-6">
             <div className="space-y-4">
+              <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-200">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-semibold text-indigo-900">📹 Body Language Analysis</p>
+                    <p className="text-sm text-indigo-700">Real-time feedback on posture, eye contact, and engagement</p>
+                  </div>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" checked={bodyLanguageEnabled} onChange={(e) => setBodyLanguageEnabled(e.target.checked)} className="w-5 h-5" />
+                    <span className="text-sm font-medium">{bodyLanguageEnabled ? "Enabled" : "Disabled"}</span>
+                  </label>
+                </div>
+              </div>
               <div>
                 <Label>Job Title *</Label>
                 <Input value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} placeholder="e.g., Software Engineer" className="mt-2" />

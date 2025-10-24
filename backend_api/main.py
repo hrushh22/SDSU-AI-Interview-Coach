@@ -56,6 +56,14 @@ class FeedbackRequest(BaseModel):
     duration: float = 0
     request_followup: bool = False
 
+class BodyLanguageRequest(BaseModel):
+    session_id: str
+    image_base64: str
+    timestamp: float
+    question: str
+    question_type: str = "behavioral"
+    user_state: str = "speaking"
+
 @app.get("/")
 def read_root():
     return {"message": "AI Interview Coach API"}
@@ -198,7 +206,7 @@ def get_feedback(req: FeedbackRequest):
         pace_wpm = int((req.word_count / req.duration) * 60) if req.duration > 0 else 0
         pace_assessment = 'good' if 120 <= pace_wpm <= 160 else 'slow' if pace_wpm < 120 else 'fast'
         
-        prompt = f"""You are an expert interview coach. Analyze this interview response.
+        prompt = f"""You are a BRUTALLY HONEST interview coach. Your job is to give REAL feedback that will actually help candidates improve.
 
 Question: {req.question}
 Question Type: {req.question_type}
@@ -209,26 +217,40 @@ Delivery Metrics:
 - Duration: {req.duration:.0f}s
 - Pace: {pace_wpm} WPM ({pace_assessment})
 
+BE HONEST AND DIRECT:
+- If the answer is terrible, say so (score 1-3/10)
+- If they didn't answer the question, call it out
+- If they gave a generic/vague answer, point it out
+- If they refused to answer or gave a joke response, score it 0-1/10
+- Only give high scores (8-10) for truly excellent answers with specific examples
+
 Provide feedback in this format:
 
 **Content Analysis:**
-[Analyze content quality, structure, and relevance]
+[Be HONEST - did they actually answer the question? Was it specific or vague? Did they use real examples?]
 
 **Delivery Assessment:**
-[Comment on pace, clarity, and speaking style]
+[Comment on pace, clarity, and speaking style - be direct about issues]
 
 **Strengths:**
-[2-3 specific things they did well]
+[List ONLY if there are actual strengths - don't make them up]
 
 **Areas for Improvement:**
-[2-3 specific suggestions with examples]
+[Be SPECIFIC and DIRECT about what needs to change]
 
 **Expected Answer:**
-[Provide a brief example of what a strong answer would include]
+[Provide a concrete example of what a GOOD answer would include]
 
 **Score: X/10**
 
-Be constructive, specific, and encouraging."""
+SCORING GUIDE:
+0-2: Didn't answer, refused, or completely off-topic
+3-4: Answered but very weak, generic, no examples
+5-6: Adequate but missing key details or structure
+7-8: Good answer with examples and structure
+9-10: Excellent answer with specific examples, metrics, and clear impact
+
+Be BRUTALLY HONEST. This is practice - they need real feedback to improve."""
         
         score = 5
         expected_answer = "A strong answer would include specific examples using the STAR method, quantifiable results, and clear demonstration of relevant skills."
@@ -262,25 +284,27 @@ Be constructive, specific, and encouraging."""
                 
         except Exception as bedrock_error:
             print(f"Bedrock error: {bedrock_error}")
-            score = 7 if req.word_count > 50 else 4
+            score = 3 if req.word_count > 50 else 1
             feedback = f"""**Content Analysis:**
-Response length: {req.word_count} words. {'Good detail level.' if req.word_count > 50 else 'Too brief - expand with examples.'}
+Response length: {req.word_count} words. {'Lacks specific examples and structure.' if req.word_count > 50 else 'Far too brief - this would fail in a real interview.'}
 
 **Delivery Assessment:**
 Pace: {pace_wpm} WPM ({pace_assessment})
 
 **Strengths:**
-• Addresses the question
-• Clear communication
+None identified - answer needs significant improvement.
 
 **Areas for Improvement:**
-• Add specific examples with STAR method
-• Include quantifiable results
+• Provide specific examples using STAR method (Situation, Task, Action, Result)
+• Include quantifiable results and metrics
+• Answer the question directly and completely
 
 **Expected Answer:**
 {expected_answer}
 
-**Score: {score}/10**"""
+**Score: {score}/10**
+
+This answer would not pass in a real interview. Practice with concrete examples."""
         
         metrics = {"word_count": req.word_count, "duration": req.duration, "pace_wpm": pace_wpm, "pace_assessment": pace_assessment}
         
@@ -349,4 +373,205 @@ def finish_session(session_id: str):
         complete_session(session_id)
         return {"message": "Session completed", "session_id": session_id}
     except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/analyze-body-language")
+def analyze_body_language(req: BodyLanguageRequest):
+    """Analyze body language from webcam frame"""
+    try:
+        from decimal import Decimal
+        
+        prompt = f"""You are a BRUTALLY HONEST body language coach analyzing a mock interview.
+
+Analyze this frame at {req.timestamp:.0f} seconds:
+Question: '{req.question}'
+User state: {req.user_state}
+
+BE HONEST AND STRICT:
+- Multiple people in frame = HIGH severity ("Only one person should be visible")
+- Looking away from camera = MEDIUM/HIGH severity ("Look directly at the camera")
+- Slouched posture = MEDIUM severity ("Sit up straight")
+- Fidgeting, head shaking = MEDIUM severity ("Stay still and composed")
+- Distracted/bored expression = MEDIUM severity ("Show engagement and interest")
+- Unprofessional background = MEDIUM severity ("Use a clean, professional background")
+- Poor lighting = LOW severity ("Improve lighting on your face")
+
+SCORING (be strict):
+- 0-4: Major issues (multiple people, looking away, slouched)
+- 5-6: Noticeable issues (occasional poor posture, some fidgeting)
+- 7-8: Good but minor improvements needed
+- 9-10: Excellent professional presence
+
+Respond in JSON format:
+{{
+  "strengths": ["brief strength if any"],
+  "improvements": ["specific issue"],
+  "actionable_tip": "IMMEDIATE action to take NOW",
+  "severity_level": "low/medium/high",
+  "eye_contact_score": 0-10,
+  "posture_score": 0-10,
+  "engagement_score": 0-10,
+  "professionalism_score": 0-10
+}}
+
+Be BRUTALLY HONEST. Set severity to HIGH for serious issues. Don't be lenient."""
+        
+        request_body = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": 800,
+            "temperature": 0.5,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/jpeg",
+                            "data": req.image_base64
+                        }
+                    },
+                    {
+                        "type": "text",
+                        "text": prompt
+                    }
+                ]
+            }]
+        }
+        
+        response = bedrock.invoke_model(
+            modelId='anthropic.claude-3-5-sonnet-20241022-v2:0',
+            body=json.dumps(request_body)
+        )
+        
+        response_body = json.loads(response['body'].read())
+        feedback_text = response_body['content'][0]['text']
+        
+        # Parse JSON from response
+        import re
+        json_match = re.search(r'\{[^}]+\}', feedback_text, re.DOTALL)
+        if json_match:
+            feedback_data = json.loads(json_match.group())
+        else:
+            feedback_data = {
+                "strengths": ["Maintaining presence"],
+                "improvements": ["Continue monitoring posture"],
+                "actionable_tip": "Keep engaging with the camera",
+                "severity_level": "low",
+                "eye_contact_score": 7,
+                "posture_score": 7,
+                "engagement_score": 7,
+                "professionalism_score": 7
+            }
+        
+        # Store in DynamoDB with Decimal conversion
+        from dynamodb_service import dynamodb, TABLE_NAME
+        table = dynamodb.Table(TABLE_NAME)
+        session = table.get_item(Key={'session_id': req.session_id}).get('Item', {})
+        body_language_data = session.get('body_language_analysis', [])
+        
+        # Convert to DynamoDB-compatible format
+        db_feedback = {
+            'timestamp': Decimal(str(req.timestamp)),
+            'feedback': {
+                'strengths': feedback_data.get('strengths', []),
+                'improvements': feedback_data.get('improvements', []),
+                'actionable_tip': feedback_data.get('actionable_tip', ''),
+                'severity_level': feedback_data.get('severity_level', 'low'),
+                'eye_contact_score': Decimal(str(feedback_data.get('eye_contact_score', 7))),
+                'posture_score': Decimal(str(feedback_data.get('posture_score', 7))),
+                'engagement_score': Decimal(str(feedback_data.get('engagement_score', 7))),
+                'professionalism_score': Decimal(str(feedback_data.get('professionalism_score', 7)))
+            },
+            'question': req.question
+        }
+        
+        body_language_data.append(db_feedback)
+        table.update_item(
+            Key={'session_id': req.session_id},
+            UpdateExpression='SET body_language_analysis = :b',
+            ExpressionAttributeValues={':b': body_language_data}
+        )
+        
+        severity = feedback_data.get('severity_level', 'low')
+        tip = feedback_data.get('actionable_tip', '')
+        print(f"{'🚨' if severity == 'high' else '⚠️' if severity == 'medium' else '✅'} [{req.timestamp:.0f}s] {severity.upper()}: {tip}")
+        return feedback_data
+        
+    except Exception as e:
+        print(f"❌ Body language analysis error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "strengths": ["Participating in interview"],
+            "improvements": ["Keep monitoring your posture"],
+            "actionable_tip": "Maintain eye contact with camera",
+            "severity_level": "low",
+            "eye_contact_score": 7,
+            "posture_score": 7,
+            "engagement_score": 7,
+            "professionalism_score": 7,
+            "error": str(e)
+        }
+
+@app.get("/body-language-report/{session_id}")
+def get_body_language_report(session_id: str):
+    """Get comprehensive body language report for session"""
+    try:
+        from dynamodb_service import dynamodb, TABLE_NAME
+        from decimal import Decimal
+        
+        table = dynamodb.Table(TABLE_NAME)
+        session = table.get_item(Key={'session_id': session_id}).get('Item', {})
+        body_language_data = session.get('body_language_analysis', [])
+        
+        if not body_language_data:
+            return {"message": "No body language data available"}
+        
+        # Calculate aggregated metrics (convert Decimal to float)
+        total_frames = len(body_language_data)
+        avg_eye_contact = sum(float(f['feedback'].get('eye_contact_score', 0)) for f in body_language_data) / total_frames
+        avg_posture = sum(float(f['feedback'].get('posture_score', 0)) for f in body_language_data) / total_frames
+        avg_engagement = sum(float(f['feedback'].get('engagement_score', 0)) for f in body_language_data) / total_frames
+        avg_professionalism = sum(float(f['feedback'].get('professionalism_score', 0)) for f in body_language_data) / total_frames
+        
+        # Collect all strengths and improvements
+        all_strengths = []
+        all_improvements = []
+        critical_moments = []
+        
+        for frame in body_language_data:
+            feedback = frame['feedback']
+            all_strengths.extend(feedback.get('strengths', []))
+            all_improvements.extend(feedback.get('improvements', []))
+            if feedback.get('severity_level') in ['high', 'medium']:
+                critical_moments.append({
+                    'timestamp': float(frame['timestamp']),
+                    'issue': feedback.get('actionable_tip', 'Review this moment')
+                })
+        
+        # Get top 3 unique strengths and improvements
+        from collections import Counter
+        top_strengths = [s for s, _ in Counter(all_strengths).most_common(3)]
+        top_improvements = [i for i, _ in Counter(all_improvements).most_common(3)]
+        
+        print(f"📊 Body language report: {total_frames} frames, avg scores: eye={avg_eye_contact:.1f}, posture={avg_posture:.1f}")
+        
+        return {
+            "overall_scores": {
+                "eye_contact": round(avg_eye_contact, 1),
+                "posture": round(avg_posture, 1),
+                "engagement": round(avg_engagement, 1),
+                "professionalism": round(avg_professionalism, 1)
+            },
+            "top_strengths": top_strengths,
+            "top_improvements": top_improvements,
+            "critical_moments": critical_moments,
+            "total_frames_analyzed": total_frames
+        }
+        
+    except Exception as e:
+        print(f"❌ Error generating body language report: {e}")
+        import traceback
+        traceback.print_exc()
         return {"error": str(e)}
